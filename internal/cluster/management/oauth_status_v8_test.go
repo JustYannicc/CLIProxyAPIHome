@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	coreauth "github.com/router-for-me/CLIProxyAPIHome/internal/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPIHome/internal/cluster"
 )
@@ -130,4 +131,53 @@ func oauthStatusV8Request(t *testing.T, handler http.Handler, path string) map[s
 		t.Fatal(errDecode)
 	}
 	return body
+}
+
+func TestOAuthStatusV8FirstPluginSuccessPollReturnsIDs(t *testing.T) {
+	db, cleanup := openManagementLogTestDB(t)
+	defer cleanup()
+	repo := cluster.NewRepository(db)
+	session, errSession := cluster.NewOAuthSessionRecord("fixture-plugin", "plugin-login", pluginOAuthSessionData(nil), time.Now())
+	if errSession != nil {
+		t.Fatal(errSession)
+	}
+	if errUpsert := repo.UpsertOAuthSession(t.Context(), session); errUpsert != nil {
+		t.Fatal(errUpsert)
+	}
+	plugin := &successfulOAuthStatusPlugin{auths: []*coreauth.Auth{
+		{ID: "plugin-first", Index: "plugin-first", Provider: "fixture-plugin"},
+		{ID: "plugin-second", Index: "plugin-second", Provider: "fixture-plugin"},
+	}}
+	h := NewHandler(repo, nil, "127.0.0.1", 0)
+	h.pluginOAuthStatus = plugin
+	engine := gin.New()
+	engine.GET("/oauth/status", h.GetAuthStatusV8)
+	for range 2 {
+		body := oauthStatusV8Request(t, engine, "/oauth/status?state="+session.State)
+		want := map[string]any{"status": "ok", "auth_ids": []any{"plugin-first", "plugin-second"}}
+		if !reflect.DeepEqual(body, want) {
+			t.Fatalf("plugin completion response = %#v, want %#v", body, want)
+		}
+	}
+	if plugin.polls != 1 {
+		t.Fatalf("plugin polls = %d, want one poll followed by the persisted result", plugin.polls)
+	}
+}
+
+type successfulOAuthStatusPlugin struct {
+	auths []*coreauth.Auth
+	polls int
+}
+
+func (p *successfulOAuthStatusPlugin) HasPluginAuthProvider(provider string) bool {
+	return provider == "fixture-plugin"
+}
+
+func (p *successfulOAuthStatusPlugin) PollPluginLogin(context.Context, string, string, map[string]any) (pluginapi.AuthLoginPollResponse, bool, error) {
+	p.polls++
+	return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusSuccess}, true, nil
+}
+
+func (p *successfulOAuthStatusPlugin) PluginLoginAuths(pluginapi.AuthLoginPollResponse) ([]*coreauth.Auth, error) {
+	return p.auths, nil
 }
