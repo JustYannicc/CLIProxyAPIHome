@@ -88,11 +88,22 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
 		return
 	}
-	authURL := buildAnthropicAuthURL(state, pkce)
-	if errRegister := h.registerOAuthSession(c, "anthropic", state, map[string]any{
+	data := map[string]any{
 		"code_verifier":  pkce.CodeVerifier,
 		"code_challenge": pkce.CodeChallenge,
-	}); errRegister != nil {
+	}
+	authURL := buildAnthropicAuthURL(state, pkce)
+	if c.Request != nil && c.Request.URL.Path == "/v8/management/oauth/auth-url" {
+		flow, redirectURI, flowAuthURL, errFlow := buildAnthropicAuthURLForFlow(c.Query("flow"), state, pkce)
+		if errFlow != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported oauth flow"})
+			return
+		}
+		data["flow"] = flow
+		data["redirect_uri"] = redirectURI
+		authURL = flowAuthURL
+	}
+	if errRegister := h.registerOAuthSession(c, "anthropic", state, data); errRegister != nil {
 		respondError(c, http.StatusInternalServerError, "oauth_session_failed", errRegister)
 		return
 	}
@@ -389,7 +400,16 @@ func (h *Handler) handleOAuthCallback(c *gin.Context) {
 	state := strings.TrimSpace(req.State)
 	code := strings.TrimSpace(req.Code)
 	errorMessage := strings.TrimSpace(req.Error)
-	if rawRedirect := strings.TrimSpace(req.RedirectURL); rawRedirect != "" {
+	codeStatePair := false
+	if c.Request.URL.Path == "/v8/management/oauth/callback" {
+		input, errInput := normalizeV8OAuthCallback(req)
+		if errInput != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": errInput.Error()})
+			return
+		}
+		state, code, errorMessage = input.state, input.code, input.error
+		codeStatePair = input.codeStatePair
+	} else if rawRedirect := strings.TrimSpace(req.RedirectURL); rawRedirect != "" {
 		parsedURL, errParse := url.Parse(rawRedirect)
 		if errParse != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid redirect_url"})
@@ -462,6 +482,10 @@ func (h *Handler) handleOAuthCallback(c *gin.Context) {
 	}
 	if !strings.EqualFold(session.Provider, provider) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "provider does not match state"})
+		return
+	}
+	if codeStatePair && (isPlugin || provider != "anthropic") {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "code/state pair is only supported for Claude"})
 		return
 	}
 
@@ -646,6 +670,11 @@ func (h *Handler) registerOAuthSession(c *gin.Context, provider, state string, d
 
 // exchangeAnthropicCallback handles an exchange anthropic callback.
 func (h *Handler) exchangeAnthropicCallback(ctx context.Context, state, code string, data map[string]any) error {
+	client := claude.NewAnthropicHttpClient(&h.oauthConfig().SDKConfig)
+	return h.exchangeAnthropicCallbackWithClient(ctx, state, code, data, client)
+}
+
+func (h *Handler) exchangeAnthropicCallbackWithClient(ctx context.Context, state, code string, data map[string]any, client *http.Client) error {
 	// Validate request inputs before mutating persisted state.
 	pkce := pkceCodes{
 		CodeVerifier:  stringFromAny(data["code_verifier"]),
@@ -654,17 +683,22 @@ func (h *Handler) exchangeAnthropicCallback(ctx context.Context, state, code str
 	if pkce.CodeVerifier == "" {
 		return fmt.Errorf("missing PKCE verifier")
 	}
+	code, errCode := splitAnthropicCodeState(code, state)
+	if errCode != nil {
+		return errCode
+	}
+	redirectURI, errRedirect := anthropicRedirectURIForSession(data)
+	if errRedirect != nil {
+		return errRedirect
+	}
 
 	reqBody := map[string]any{
-		"code":          strings.Split(strings.TrimSpace(code), "#")[0],
+		"code":          code,
 		"state":         state,
 		"grant_type":    "authorization_code",
 		"client_id":     claude.ClientID,
-		"redirect_uri":  anthropicRedirectURI,
+		"redirect_uri":  redirectURI,
 		"code_verifier": pkce.CodeVerifier,
-	}
-	if parts := strings.Split(strings.TrimSpace(code), "#"); len(parts) > 1 && strings.TrimSpace(parts[1]) != "" {
-		reqBody["state"] = strings.TrimSpace(parts[1])
 	}
 
 	rawBody, errMarshal := json.Marshal(reqBody)
@@ -678,7 +712,9 @@ func (h *Handler) exchangeAnthropicCallback(ctx context.Context, state, code str
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	client := claude.NewAnthropicHttpClient(&h.oauthConfig().SDKConfig)
+	if client == nil {
+		return fmt.Errorf("anthropic oauth http client is required")
+	}
 	resp, errDo := client.Do(req)
 	if errDo != nil {
 		return errDo
