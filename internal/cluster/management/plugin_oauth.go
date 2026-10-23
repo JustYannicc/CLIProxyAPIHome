@@ -257,7 +257,7 @@ func (h *Handler) respondPluginAuthStatus(c *gin.Context, ctx context.Context, s
 			c.JSON(http.StatusOK, gin.H{"status": "error", "error": "Failed to save authentication tokens"})
 			return true
 		}
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		h.GetAuthStatus(c)
 	default:
 		c.JSON(http.StatusOK, gin.H{"status": "wait"})
 	}
