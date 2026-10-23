@@ -764,6 +764,10 @@ func (h *Handler) exchangeAnthropicCallback(ctx context.Context, state, code str
 
 // exchangeCodexCallback handles an exchange codex callback.
 func (h *Handler) exchangeCodexCallback(ctx context.Context, code string, data map[string]any) error {
+	return h.exchangeCodexCallbackWithClient(ctx, h.oauthHTTPClient(), code, data)
+}
+
+func (h *Handler) exchangeCodexCallbackWithClient(ctx context.Context, client *http.Client, code string, data map[string]any) error {
 	// Validate request inputs before mutating persisted state.
 	pkce := pkceCodes{
 		CodeVerifier:  stringFromAny(data["code_verifier"]),
@@ -771,6 +775,9 @@ func (h *Handler) exchangeCodexCallback(ctx context.Context, code string, data m
 	}
 	if pkce.CodeVerifier == "" {
 		return fmt.Errorf("missing PKCE verifier")
+	}
+	if client == nil {
+		return fmt.Errorf("codex oauth HTTP client is required")
 	}
 
 	form := url.Values{}
@@ -791,7 +798,7 @@ func (h *Handler) exchangeCodexCallback(ctx context.Context, code string, data m
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, errDo := h.oauthHTTPClient().Do(req)
+	resp, errDo := client.Do(req)
 	if errDo != nil {
 		return errDo
 	}

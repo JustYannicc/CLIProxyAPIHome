@@ -2,7 +2,6 @@ package management
 
 import (
 	"bytes"
-	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -28,36 +27,37 @@ func (w failingCodexDeviceWriter) Write([]byte) (int, error) {
 	return 0, w.err
 }
 
-type failingCodexDeviceHTTPWriter struct {
-	status int
-	body   bytes.Buffer
-	err    error
-	header http.Header
+type codexDeviceHTTPResponseWriter struct {
+	status   int
+	body     bytes.Buffer
+	flushErr error
+	header   http.Header
+	onFlush  func() error
 }
 
-func (w *failingCodexDeviceHTTPWriter) Header() http.Header {
+func (w *codexDeviceHTTPResponseWriter) Header() http.Header {
 	if w.header == nil {
 		w.header = make(http.Header)
 	}
 	return w.header
 }
 
-func (w *failingCodexDeviceHTTPWriter) Write(body []byte) (int, error) {
+func (w *codexDeviceHTTPResponseWriter) Write(body []byte) (int, error) {
 	return w.body.Write(body)
 }
 
-func (w *failingCodexDeviceHTTPWriter) WriteHeader(status int) {
+func (w *codexDeviceHTTPResponseWriter) WriteHeader(status int) {
 	w.status = status
 }
 
-func (w *failingCodexDeviceHTTPWriter) FlushError() error {
-	if w.err == nil {
-		return errors.New("transport flush failed")
+func (w *codexDeviceHTTPResponseWriter) FlushError() error {
+	if w.onFlush != nil {
+		return w.onFlush()
 	}
-	return w.err
+	return w.flushErr
 }
 
-func (w *failingCodexDeviceHTTPWriter) Flush() {
+func (w *codexDeviceHTTPResponseWriter) Flush() {
 	_ = w.FlushError()
 }
 

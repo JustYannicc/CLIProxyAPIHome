@@ -26,6 +26,8 @@ type codexDeviceAuthURLResponse struct {
 // RequestCodexDeviceToken starts the Codex device authorization flow.
 func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 	deadline := time.Now().Add(codex.DeviceFlowTimeout)
+	// Keep proxy settings fixed across issuance, polling, and exchange.
+	oauthClient := h.oauthHTTPClient()
 	state, errState := generateOAuthState("cdx")
 	if errState != nil {
 		log.Errorf("cluster oauth: failed to generate codex device state: %v", errState)
@@ -39,7 +41,7 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 
 	requestCtx, cancelRequest := context.WithDeadline(requestContextOrBackground(c), deadline)
 	defer cancelRequest()
-	deviceFlow, errDevice := codex.RequestDeviceCode(requestCtx, h.oauthHTTPClient())
+	deviceFlow, errDevice := codex.RequestDeviceCode(requestCtx, oauthClient)
 	if errDevice != nil {
 		if errors.Is(requestCtx.Err(), context.Canceled) {
 			if errCancel := h.cancelCodexDeviceSession(state); errCancel != nil {
@@ -99,7 +101,7 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 
 	worker := func() {
 		defer cancelWorker()
-		if errWait := h.waitForCodexDeviceAuthorization(workerCtx, state, deviceFlow); errWait != nil {
+		if errWait := h.waitForCodexDeviceAuthorization(workerCtx, oauthClient, state, deviceFlow); errWait != nil {
 			if errorsIsContextDeadline(errWait, workerCtx.Err()) {
 				h.setCodexDeviceSessionError(state, "Authentication failed")
 				return
@@ -127,6 +129,13 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 		UserCode:  deviceFlow.UserCode,
 		ExpiresIn: expiresIn,
 	}
+	if errRequest := requestCtx.Err(); errRequest != nil {
+		cancelWorker()
+		if errCancel := h.cancelCodexDeviceSession(state); errCancel != nil {
+			log.Errorf("cluster oauth: failed to cancel disconnected codex device session before response handoff: %v", errCancel)
+		}
+		return
+	}
 	if errWrite := writeCodexDeviceResponse(c, http.StatusOK, response); errWrite != nil {
 		cancelWorker()
 		if errCancel := h.cancelCodexDeviceSession(state); errCancel != nil {
@@ -135,25 +144,18 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 		log.Errorf("cluster oauth: failed to deliver codex device authorization response: %v", errWrite)
 		return
 	}
-	if errRequest := requestCtx.Err(); errRequest != nil {
-		cancelWorker()
-		if errCancel := h.cancelCodexDeviceSession(state); errCancel != nil {
-			log.Errorf("cluster oauth: failed to cancel disconnected codex device session after response write: %v", errCancel)
-		}
-		return
-	}
 	h.runCodexDeviceWorker(worker)
 }
 
-func (h *Handler) waitForCodexDeviceAuthorization(ctx context.Context, state string, deviceFlow *codex.DeviceFlow) error {
-	deviceToken, errWait := codex.WaitForDeviceAuthorization(ctx, h.oauthHTTPClient(), deviceFlow)
+func (h *Handler) waitForCodexDeviceAuthorization(ctx context.Context, client *http.Client, state string, deviceFlow *codex.DeviceFlow) error {
+	deviceToken, errWait := codex.WaitForDeviceAuthorization(ctx, client, deviceFlow)
 	if errWait != nil {
 		return errWait
 	}
 	if deviceToken == nil || deviceToken.AuthorizationCode == "" || deviceToken.CodeVerifier == "" || deviceToken.CodeChallenge == "" {
 		return fmt.Errorf("codex device flow token response missing required fields")
 	}
-	return h.exchangeCodexCallback(ctx, deviceToken.AuthorizationCode, map[string]any{
+	return h.exchangeCodexCallbackWithClient(ctx, client, deviceToken.AuthorizationCode, map[string]any{
 		"flow":           "device",
 		"code_verifier":  deviceToken.CodeVerifier,
 		"code_challenge": deviceToken.CodeChallenge,

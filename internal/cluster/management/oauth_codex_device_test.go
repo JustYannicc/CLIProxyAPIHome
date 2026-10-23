@@ -159,7 +159,7 @@ func TestCodexDeviceFlushFailureCancelsSessionWithoutPolling(t *testing.T) {
 		return managementDeviceResponse(http.StatusOK, `{}`), nil
 	})}
 	h.codexDeviceWorker = func(work func()) { work() }
-	responseWriter := &failingCodexDeviceHTTPWriter{err: errors.New("transport flush failed")}
+	responseWriter := &codexDeviceHTTPResponseWriter{flushErr: errors.New("transport flush failed")}
 	ctx, _ := gin.CreateTestContext(responseWriter)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/v8/management/oauth/auth-url?provider=codex&flow=device", nil)
 	h.StartOAuthV8(ctx)

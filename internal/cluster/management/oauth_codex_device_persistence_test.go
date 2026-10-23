@@ -173,7 +173,7 @@ func TestCodexDeviceWorkerExchangesAndPersistsCredential(t *testing.T) {
 	})}
 	ctx, cancel := h.oauthSessionContext(context.Background(), state, codex.DeviceFlowTimeout)
 	defer cancel()
-	if errWait := h.waitForCodexDeviceAuthorization(ctx, state, &codex.DeviceFlow{
+	if errWait := h.waitForCodexDeviceAuthorization(ctx, h.oauthHTTPClient(), state, &codex.DeviceFlow{
 		DeviceAuthID: "private-device-id",
 		UserCode:     "ABCD-EFGH",
 		PollInterval: time.Second,
